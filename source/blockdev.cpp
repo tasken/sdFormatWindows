@@ -55,22 +55,6 @@ int BlockDev::open(const char *const path, const bool /* rw */) noexcept
 		}
 		diskSize = (u64)diskGeometryEx.DiskSize.QuadPart;
 
-		// Lock volume. Will return error 5 == access denied without it.
-		if (!DeviceIoControl (handle, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &bytesReturned, NULL))
-		{
-			printf("Error locking volume\n");
-			res = GetLastError();
-			break;
-		}
-
-		// Dismount volume. Will return error 5 == access denied without it.
-		if (!DeviceIoControl (handle, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &bytesReturned, NULL))
-		{
-			printf("Error dismounting volume\n");
-			res = GetLastError();
-			break;
-		}
-
 		m_handle = handle;
 		m_sectors = diskSize / m_sectorSize;
 	} while(0);
@@ -146,6 +130,9 @@ int BlockDev::write(const void *buf, const u64 sector, const u64 count) noexcept
 	return res;
 }
 
+// not yet defined in mingw-w64
+#define IOCTL_DISK_ARE_VOLUMES_READY 0x00070087
+
 /* FCNET CHANGE START - use eraseAll to clear drive partitions */
 // We ignore the secure erase option.
 // Hijack this function, which will use Win32 API to "clean" the drive of partition tables.
@@ -155,28 +142,16 @@ int BlockDev::eraseAll(const bool /* secure */) /* const */ noexcept
 {
 	int res = 0;
 	DWORD bytesReturned = 0;
-	CREATE_DISK diskStruct = {};
-	diskStruct.PartitionStyle = PARTITION_STYLE_MBR;
 
-	if(!DeviceIoControl(m_handle, IOCTL_DISK_CREATE_DISK, &diskStruct, sizeof(CREATE_DISK), NULL, 0, &bytesReturned, NULL))
+	if(!DeviceIoControl(m_handle, IOCTL_DISK_DELETE_DRIVE_LAYOUT, NULL, 0, NULL, 0, &bytesReturned, NULL))
 	{
 		res = GetLastError();
 		printf("Failed to discard all data on device, GetLastError() = %d\n", res);
 		return res;
 	}
 
-	// we must reopen drive for Windows to detect that the partition table is gone
-	// Unlock volume.
-	if (!DeviceIoControl(m_handle, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0, &bytesReturned, NULL)) {
-		res = GetLastError();
-		printf("Error unlocking volume, GetLastError() == %d\n", res);
-		return res;
-	}
-
-	while(CloseHandle(m_handle) == 0);
-
-	// reopen the handle. Now Windows should let us do anything
-	m_handle = CreateFile(pDrvPath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, nullptr);
+	// Blocking function. It waits until the drive is ready for us to mess with.
+	DeviceIoControl(m_handle, IOCTL_DISK_ARE_VOLUMES_READY, NULL, 0, NULL, 0, &bytesReturned, NULL);
 
 	return res;
 }
@@ -185,8 +160,10 @@ int BlockDev::eraseAll(const bool /* secure */) /* const */ noexcept
 // TODO: Should we return any error that is not EINTR?
 void BlockDev::close(void) noexcept
 {
+	DWORD bytesReturned = 0;
 	if(m_dirty)
 	{
+		DeviceIoControl(m_handle, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &bytesReturned, NULL);
 		// Flush all writes to the device.
 		FlushFileBuffers(m_handle);
 	}
